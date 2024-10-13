@@ -1,0 +1,116 @@
+name: "Automerge PR"
+description: "Automatically merges PR from specific actors after all status checks pass."
+author: "Eetu Sutinen"
+
+branding:
+  color: blue
+  icon: git-merge
+
+inputs:
+  actors:
+    description: "Array of GitHub actors allowed to trigger automerge. Defaults to dependabot."
+    required: false
+    default: |
+      - dependabot[bot]
+  ignore_jobs:
+    description: "Array of job names to ignore in status checks. Defaults to empty."
+    required: false
+  interval:
+    description: "Time in seconds to wait before checking PR statuses again."
+    required: false
+    default: 10
+  merge_method:
+    description: "The method to use when merging the PR. Options are 'merge' (default), 'squash', or 'rebase'."
+    required: false
+    default: "merge"
+    options:
+      - merge
+      - squash
+      - rebase
+  github_token:
+    description: "GitHub token used for authentication."
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/checkout@v4
+
+    - name: Wait for required status checks
+      shell: bash
+      run: |
+        pr_number=${{ github.event.pull_request.number }}
+        current_job_name="${{ github.job }}"
+
+        # Actors and jobs to ignore
+        actors=(${{ inputs.actors }})
+
+        if [[ -z "${{ inputs.ignore_jobs }}" ]]; then
+          ignore_jobs=()
+        else
+          ignore_jobs=(${{ inputs.ignore_jobs }})
+        fi
+
+        # Append the current job name to ignore_jobs array
+        ignore_jobs+=("$current_job_name")
+
+        echo "Actors: ${actors[@]}"
+        echo "Ignore jobs: ${ignore_jobs[@]}"
+
+        # Check if the actor is allowed to automerge
+        is_allowed=false
+        for actor in "${actors[@]}"; do
+          if [[ "${actor}" == "${{ github.actor }}" ]]; then
+            is_allowed=true
+            break
+          fi
+        done
+
+        if [ "$is_allowed" = true ]; then
+          echo "Actor ${{ github.actor }} is allowed to automerge."
+
+          echo "Waiting for status checks to pass for PR #$pr_number..."
+
+          while true; do
+            # Fetch the status checks for the PR
+            status=$(gh pr checks $pr_number --json name,state,event)
+
+            # Ignore the specified jobs in the output
+            filtered_status=$(echo $status | jq --argjson ignore_jobs "$(printf '%s\n' "${ignore_jobs[@]}" | jq -R . | jq -s .)" '[.[] | select(.name | IN($ignore_jobs[]) | not)]')
+
+            # Check if any required checks have failed
+            failed=$(echo $filtered_status | jq -r '.[] | select(.state == "FAILURE")')
+
+            # Check if there are any checks still in progress
+            pending=$(echo $filtered_status | jq -r '.[] | select(.state != "SUCCESS" and .state != "FAILURE")')
+
+            if [[ -n "$failed" ]]; then
+              echo "A status check has failed. Exiting."
+              exit 1
+            elif [[ -z "$pending" ]]; then
+              echo "All required status checks (excluding ignored jobs) have passed."
+              break
+            else
+              echo "Status checks are still in progress. Waiting..."
+              sleep ${{ inputs.interval }}
+            fi
+          done
+
+        else
+          echo "Actor ${{ github.actor }} is not allowed to automerge. Exiting."
+          exit 1
+        fi
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+
+    - name: Merge PR
+      shell: bash
+      run: |
+        pr_number=${{ github.event.pull_request.number }}
+        merge_method=${{ inputs.merge_method }}
+
+        echo "Merging PR #$pr_number using method: $merge_method"
+
+        gh pr merge $pr_number --${merge_method} --admin
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
