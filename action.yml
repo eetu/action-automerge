@@ -97,13 +97,15 @@ runs:
           done
 
         else
-          echo "Actor ${{ github.actor }} is not allowed to automerge. Exiting."
-          exit 1
+          echo "Actor ${{ github.actor }} is not allowed to automerge. Skipping."
+          echo "skip_merge=true" >> $GITHUB_ENV
+          exit 0
         fi
       env:
         GH_TOKEN: ${{ inputs.github_token }}
 
     - name: Merge PR
+      if: env.skip_merge != 'true'
       shell: bash
       run: |
         pr_number=${{ github.event.pull_request.number }}
